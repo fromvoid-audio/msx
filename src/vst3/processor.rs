@@ -245,7 +245,8 @@ impl IAudioProcessorTrait for Processor {
         let Some(setup) = (unsafe { setup.as_ref() }) else {
             return kInvalidArgument;
         };
-        if !(8_000.0..=768_000.0).contains(&setup.sampleRate) {
+        // Accept nonstandard host rates while bounding the FFT work and allocation.
+        if !(100.0..=2_000_000.0).contains(&setup.sampleRate) {
             return kInvalidArgument;
         }
         self.with_runtime(|runtime| {
