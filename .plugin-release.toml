@@ -1,0 +1,19 @@
+schema = 1
+name = "MXH"
+package = "mxh"
+library = "mxh"
+version_env = "MXH_DEV_BUILD_VERSION"
+
+[release]
+expected_platforms = ["macos-arm64", "macos-x64"]
+
+[[variants]]
+name = "MXH"
+slug = "mxh"
+archive_slug = "MXH"
+bundle_id = "com.portalsurfer.mxh.vst3"
+features = []
+
+[[hooks.checks]]
+argv = ["bash", "scripts/ci.sh"]
+platforms = ["macos-arm64", "macos-x64"]
