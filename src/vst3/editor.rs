@@ -4,7 +4,7 @@ use toybox::{
     gpui::{
         AppContext, Context, Div, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
         MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Render,
-        StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
+        StatefulInteractiveElement, Styled, Task, Window, div, px, rgb,
     },
     gpui_gui::GpuiHostedGui,
     vst3::prelude::{IComponentHandler2, IComponentHandler2Trait, InstanceConnection},
@@ -31,8 +31,8 @@ const LOW: u32 = 0x81b6f3;
 const NEAR: u32 = 0x6fd8bb;
 const GRAPH_H: f32 = 144.0;
 
-type Focuses = [FocusHandle; MAX_BANDS + 5];
-const OFFSET: usize = MAX_BANDS + 4;
+type Focuses = [FocusHandle; MAX_BANDS + 4];
+const OFFSET: usize = MAX_BANDS + 3;
 
 struct Editor {
     connection: Arc<InstanceConnection<Shared>>,
@@ -130,7 +130,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let focus_index = match control {
-            Stepper::Crossover(index) => 5 + index,
+            Stepper::Crossover(index) => 4 + index,
             Stepper::Offset => OFFSET,
         };
         let focus = self.focus[focus_index].clone();
@@ -195,7 +195,7 @@ impl Editor {
             .hover(|style| style.bg(rgb(GRID)).text_color(rgb(TEXT)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 let id = match control {
-                    Stepper::Crossover(index) => 5 + index,
+                    Stepper::Crossover(index) => 4 + index,
                     Stepper::Offset => OFFSET,
                 };
                 window.focus(&this.focus[id], cx);
@@ -246,8 +246,6 @@ impl Render for Editor {
             "Waiting for audio processor".to_owned()
         } else if s.capturing && s.active_seconds == 0.0 {
             "Play the reference in your DAW".to_owned()
-        } else if s.capturing && s.timeline_full {
-            "Timeline capture limit reached".to_owned()
         } else if s.capturing {
             format!("Capturing · {:.1} s of audio", s.active_seconds)
         } else if has_reference {
@@ -386,22 +384,6 @@ impl Render for Editor {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .when(compare, |row| {
-                                row.child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(MUTED))
-                                        .child("Compare"),
-                                )
-                                .child(self.button(
-                                    4,
-                                    if s.aligned { "Timeline" } else { "Peak" },
-                                    Action::ToggleComparison,
-                                    self.connected && s.can_align,
-                                    false,
-                                    cx,
-                                ))
-                            })
                             .child(
                                 div()
                                     .text_size(px(11.0))
@@ -441,9 +423,7 @@ impl Render for Editor {
                     .child(if s.capturing && !s.ready {
                         "Capture at least one second of audible material."
                     } else if s.capturing {
-                        "Use reference to save this capture."
-                    } else if s.aligned && !s.aligned_frame {
-                        "Play the captured section at its original position, or switch to Peak."
+                        "Use reference to save the peak in each band."
                     } else if has_reference {
                         "Raise a mix element until its band triggers, then back off until it clears."
                     } else {
@@ -498,15 +478,13 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                             absolute_db(live)
                         }),
                 )
-                .when(!compare || !s.aligned, |band| {
-                    band.child(
-                        div()
-                            .text_center()
-                            .text_size(px(10.0))
-                            .text_color(rgb(MUTED))
-                            .child(absolute_db(target)),
-                    )
-                }),
+                .child(
+                    div()
+                        .text_center()
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .child(absolute_db(target)),
+                ),
         );
     }
     let legend = div()
@@ -558,14 +536,12 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                                 .text_color(rgb(MUTED))
                                 .child(if compare { "Δ dB" } else { "Live" }),
                         )
-                        .when(!compare || !s.aligned, |axis| {
-                            axis.child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(if s.capturing { "Peak" } else { "Target" }),
-                            )
-                        }),
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(MUTED))
+                                .child(if s.capturing { "Peak" } else { "Target" }),
+                        ),
                 )
                 .child(bands),
         )

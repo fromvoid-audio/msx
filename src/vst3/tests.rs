@@ -91,8 +91,6 @@ fn host_capture_passes_stereo_through_and_restores_a_distinct_instance() {
         data.inputs = &mut input;
         data.outputs = &mut output;
         data.symbolicSampleSize = setup.symbolicSampleSize;
-        let mut context = playing_context((block * BLOCK) as i64);
-        data.processContext = &mut context;
         assert_eq!(unsafe { audio.process(&mut data) }, kResultOk);
         assert_eq!(left, expected[0]);
         assert_eq!(right_out, expected[1]);
@@ -100,9 +98,8 @@ fn host_capture_passes_stereo_through_and_restores_a_distinct_instance() {
     assert_eq!(unsafe { audio.setProcessing(0) }, kResultOk);
     assert!(shared.apply(Action::Save));
     assert!(shared.apply(Action::Offset(-2)));
-    let saved = shared.state();
-    assert!(shared.snapshot().can_align);
-    assert!((saved.preset.target(3).unwrap() - (-16.052)).abs() < 0.02);
+    let saved = shared.preset();
+    assert!((saved.target(3).unwrap() - (-16.052)).abs() < 0.02);
 
     let stream = ComWrapper::new(Stream(RefCell::new(Cursor::new(Vec::new()))));
     let stream_ptr = stream.to_com_ptr::<IBStream>().unwrap();
@@ -118,19 +115,19 @@ fn host_capture_passes_stereo_through_and_restores_a_distinct_instance() {
     let new_edit = restored_editor.to_com_ptr::<IConnectionPoint>().unwrap();
     assert_eq!(unsafe { new_proc.connect(new_edit.as_ptr()) }, kResultOk);
     assert_eq!(
-        restored_editor.connection.shared().state(),
-        SavedState::default()
+        restored_editor.connection.shared().preset(),
+        Preset::default()
     );
     assert_eq!(
         unsafe { restored_component.setState(stream_ptr.as_ptr()) },
         kResultOk
     );
-    assert_eq!(restored_editor.connection.shared().state(), saved);
+    assert_eq!(restored_editor.connection.shared().preset(), saved);
     assert_eq!(
         unsafe { restored_component.setState(ptr::null_mut()) },
         kInvalidArgument
     );
-    assert_eq!(restored_editor.connection.shared().state(), saved);
+    assert_eq!(restored_editor.connection.shared().preset(), saved);
 }
 
 fn playing_context(sample: i64) -> ProcessContext {
@@ -143,7 +140,7 @@ fn playing_context(sample: i64) -> ProcessContext {
 }
 
 #[test]
-fn transport_aligned_capture_stays_idle_for_replay_and_only_triggers_on_excess() {
+fn fixed_peak_stays_idle_on_unchanged_replay_at_a_different_position() {
     let processor = ComWrapper::new(processor::Processor::new());
     let controller = ComWrapper::new(controller::Controller::new());
     let audio = processor.to_com_ptr::<IAudioProcessor>().unwrap();
@@ -161,7 +158,7 @@ fn transport_aligned_capture_stays_idle_for_replay_and_only_triggers_on_excess()
     );
     assert_eq!(unsafe { audio.setProcessing(1) }, kResultOk);
 
-    let process = |start: usize, len: usize, gain: f32| {
+    let process = |start: usize, len: usize, gain: f32, timeline_offset: i64| {
         let mut buf: [f32; 1024] = std::array::from_fn(|i| {
             let sample = start + i;
             let time = sample as f64 / 48_000.0;
@@ -174,7 +171,7 @@ fn transport_aligned_capture_stays_idle_for_replay_and_only_triggers_on_excess()
             ((TAU * 750.0 * time).sin() * dynamics) as f32 * gain
         });
         let mut channels = [buf.as_mut_ptr()];
-        let mut context = playing_context(start as i64);
+        let mut context = playing_context(start as i64 + timeline_offset);
         // SAFETY: initializes only numeric, pointer and union fields.
         let (mut input, mut output, mut data): (AudioBusBuffers, AudioBusBuffers, ProcessData) =
             unsafe { std::mem::zeroed() };
@@ -196,34 +193,28 @@ fn transport_aligned_capture_stays_idle_for_replay_and_only_triggers_on_excess()
     let end = start + 509 * 220;
     shared.apply(Action::Begin);
     for pos in (start..end).step_by(509) {
-        process(pos, 509, 1.0);
+        process(pos, 509, 1.0, 0);
     }
     assert!(shared.apply(Action::Save));
-    assert!(shared.snapshot().aligned);
+    let reference = shared.preset();
+    assert!(reference.target(3).unwrap() > -23.0);
 
-    // Capture and replay use different block sizes and start positions.
-    // The second unchanged replay seeks into the middle of the capture.
+    // The replay is at a different DAW position, with a different processing
+    // block size. Each pass starts independently of the previous one.
     for (pos, gain) in [(0, 1.0), (41_321, 1.0), (13_312, 0.5), (38_409, 2.0)] {
-        let mut matched = 0;
-        let mut triggered = false;
+        assert_eq!(unsafe { audio.setProcessing(1) }, kResultOk);
+        let mut strongest = None::<f32>;
         for pos in (pos..end - 733).step_by(733) {
-            let snapshot = process(pos, 733, gain);
-            if snapshot.aligned_frame {
-                matched += 1;
-                if gain <= 1.0 {
-                    assert!(snapshot.excess.iter().all(Option::is_none));
-                } else if let Some(excess) = snapshot.excess[3] {
-                    triggered = true;
-                    assert!((excess - 6.021).abs() < 0.02);
-                }
+            let snapshot = process(pos, 733, gain, 1_000_531);
+            assert_eq!(snapshot.preset, reference);
+            if gain <= 1.0 {
+                assert!(snapshot.excess.iter().all(Option::is_none));
+            } else if let Some(excess) = snapshot.excess[3] {
+                strongest = Some(strongest.map_or(excess, |before| before.max(excess)));
             }
         }
-        assert!(matched > 30);
-        assert_eq!(triggered, gain > 1.0);
+        if gain > 1.0 {
+            assert!((strongest.unwrap() - 6.021).abs() < 0.5);
+        }
     }
-    let outside_capture = process(end + 500, 512, 1.0);
-    assert!(!outside_capture.aligned_frame);
-    assert!(outside_capture.excess.iter().all(Option::is_none));
-    assert!(shared.apply(Action::ToggleComparison));
-    assert!(!shared.snapshot().aligned);
 }

@@ -17,10 +17,11 @@ impl Controller {
     pub const CID: TUID = uid(0x05EF5EED, 0xDB6346BC, 0x80428B55, 0xF6FFD38E);
 
     pub fn new() -> Self {
+        let (shared, _) = Shared::new();
         Self {
             connection: Arc::new(InstanceConnection::new(
                 InstanceConnectionRole::Controller,
-                Arc::new(Shared::detached()),
+                Arc::new(shared),
             )),
             handler: Rc::new(RefCell::new(None)),
         }

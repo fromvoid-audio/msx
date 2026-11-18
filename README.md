@@ -5,11 +5,10 @@ MXH is a macOS VST3 reference meter built with Toybox. It measures band levels w
 1. Insert MXH on a bus that can receive your reference track and your mix.
 2. Set 2–8 bands and adjust their crossovers. Click the frequency steppers, drag a frequency vertically, or focus it and use the arrow keys.
 3. Click **Capture reference**, play a representative section, and click **Use reference**. Capture at least one second of audible material.
-4. Replay the captured passage at its original DAW position with **Compare** set to **Timeline**. Unchanged playback stays idle, including changes in dynamics within the passage.
-5. For a different song or a moved clip, switch **Compare** to **Peak**. This uses the highest smoothed RMS level captured in each band. Raise a mix element until you see an orange bar, then back it off until the bar clears. Bars show only levels more than 1 dB above target.
-6. Use **Target offset** to align the whole reference with your gain staging. Save the session or a host plug-in preset to reuse the reference.
+4. Switch the bus to your mix. Each band uses its captured peak as a fixed target. Raise a mix element until its band shows an orange bar, then back it off until the bar clears. The bar appears when the level exceeds the target by more than 1 dB.
+5. Use **Target offset** to align the reference with your gain staging. Save the session or a host plug-in preset to reuse the reference.
 
-Timeline comparison uses the DAW playhead and the sample rate used for capture. Positions outside the capture stay idle. Existing references open in Peak mode. Capture again to add a timeline. **Capture again** retains the prior reference until you accept a replacement. **Clear reference** unlocks the band layout. Tab moves focus, Enter or Space activates buttons, and Shift plus an arrow key makes larger stepper adjustments.
+The peak is the highest smoothed RMS level reached in each band during the capture. You can use the reference anywhere in the project or in another session. Existing references retain their peaks on load. **Capture again** retains the prior reference until you accept a replacement. **Clear reference** unlocks the band layout. Tab moves focus, Enter or Space activates buttons, and Shift plus an arrow key makes larger stepper adjustments.
 
 ## Build on macOS
 
