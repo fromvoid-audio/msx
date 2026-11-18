@@ -10,14 +10,20 @@ pub const LOW_HZ: u16 = 20;
 pub const HIGH_HZ: u16 = 20_000;
 pub const FLOOR_DB: f32 = -90.0;
 pub const MIN_CAPTURE_SECONDS: f64 = 1.0;
-pub const NEAR_DB: f32 = 1.0;
+pub const TRIGGER_DB: f32 = 1.0;
 const ACTIVE_POWER: f64 = 3.162_277_660e-8; // −75 dBFS
-const MIN_TARGET_DB: f32 = -84.0;
+pub const MIN_TARGET_DB: f32 = -84.0;
 const SMOOTH_SECONDS: f64 = 0.15;
 const MIN_CUT: u16 = 35;
 const MAX_CUT: u16 = 16_000;
 
 pub type Levels = [Option<f32>; MAX_BANDS];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FrameTime {
+    pub sample_rate_bits: u64,
+    pub end_sample: i64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
@@ -121,6 +127,8 @@ pub struct Report {
     pub command: Command,
     pub audible: bool,
     pub live: Levels,
+    pub window: Levels,
+    pub time: Option<FrameTime>,
     pub peaks: Levels,
     pub active_seconds: f64,
 }
@@ -145,6 +153,8 @@ pub struct Analyzer {
     until_frame: usize,
     power: [f64; MAX_BANDS],
     primed: bool,
+    next_project_sample: Option<i64>,
+    align_next: bool,
     ranges: [std::ops::Range<usize>; MAX_BANDS],
     report: Report,
 }
@@ -173,6 +183,8 @@ impl Analyzer {
             until_frame: size,
             power: [0.0; MAX_BANDS],
             primed: false,
+            next_project_sample: None,
+            align_next: true,
             ranges: std::array::from_fn(|_| 0..0),
             report: Report {
                 command,
@@ -217,6 +229,26 @@ impl Analyzer {
         self.primed = false;
         self.report.audible = false;
         self.report.live = [None; MAX_BANDS];
+        self.report.window = [None; MAX_BANDS];
+        self.align_next = true;
+    }
+
+    /// Align complete windows to a fixed grid in DAW sample time. A seek
+    /// starts a fresh window, with no samples carried across the boundary.
+    pub fn begin_block(&mut self, start: Option<i64>, samples: i32) -> bool {
+        let discontinuity = start != self.next_project_sample;
+        if discontinuity {
+            self.reset_live();
+        }
+        if self.align_next {
+            if let Some(start) = start {
+                let hop = (self.history.len() / 4) as i64;
+                self.until_frame += (-start.rem_euclid(hop)).rem_euclid(hop) as usize;
+            }
+            self.align_next = false;
+        }
+        self.next_project_sample = start.and_then(|start| start.checked_add(i64::from(samples)));
+        discontinuity
     }
 
     fn update_ranges(&mut self) {
@@ -287,6 +319,7 @@ impl Analyzer {
             };
             let db = (10.0 * self.power[band].max(0.0).log10()) as f32;
             self.report.live[band] = Some(db.max(FLOOR_DB));
+            self.report.window[band] = Some(((10.0 * power.log10()) as f32).max(FLOOR_DB));
         }
         self.primed = true;
         self.report.audible = total_power >= ACTIVE_POWER;

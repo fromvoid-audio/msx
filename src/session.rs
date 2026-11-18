@@ -1,13 +1,17 @@
-//! Capture and project state. The audio thread only touches its triple-buffer endpoints.
+//! Capture and project state. The audio thread communicates through bounded channels.
 
 use std::{
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
+use rtrb::{Consumer, Producer, RingBuffer};
 use triple_buffer::{Input, Output, triple_buffer};
 
-use crate::analyzer::{Command, FLOOR_DB, Layout, Levels, MAX_BANDS, Report};
+use crate::{
+    analyzer::{Command, FLOOR_DB, Layout, Levels, MAX_BANDS, MIN_TARGET_DB, Report, TRIGGER_DB},
+    timeline::{FRAME_BYTES, MAX_TIMELINE_FRAMES, TimelineFrame},
+};
 
 const OFFSET_LIMIT: i8 = 48; // Half-decibel steps.
 const STATE_BYTES: usize = (MAX_BANDS - 1) * 2 + 1 + MAX_BANDS * 4;
@@ -91,6 +95,87 @@ impl Preset {
     }
 }
 
+/// Host-persisted levels and the user's comparison mode. Old states are peak-only.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SavedState {
+    pub preset: Preset,
+    aligned: bool,
+    timeline: Arc<[TimelineFrame]>,
+}
+
+impl SavedState {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(STATE_BYTES + 1 + self.timeline.len() * FRAME_BYTES);
+        bytes.extend(self.preset.encode());
+        bytes.push(u8::from(self.aligned));
+        for frame in self.timeline.iter() {
+            frame.encode(&mut bytes);
+        }
+        bytes
+    }
+
+    pub fn decode(version: u32, bytes: &[u8]) -> Option<Self> {
+        if version == 1 {
+            return Some(Self {
+                preset: Preset::decode(bytes)?,
+                ..Self::default()
+            });
+        }
+        let (old, rest) = bytes.split_at_checked(STATE_BYTES)?;
+        let preset = Preset::decode(old)?;
+        let (&mode, frames) = rest.split_first()?;
+        if mode > 1
+            || !frames.len().is_multiple_of(FRAME_BYTES)
+            || frames.len() / FRAME_BYTES > MAX_TIMELINE_FRAMES
+            || (mode == 1 && frames.is_empty())
+            || (!frames.is_empty() && !preset.has_reference())
+        {
+            return None;
+        }
+        let timeline: Vec<_> = frames
+            .as_chunks::<FRAME_BYTES>()
+            .0
+            .iter()
+            .map(|frame| TimelineFrame::decode(frame, preset.layout.len()))
+            .collect::<Option<_>>()?;
+        if !timeline.windows(2).all(|pair| pair[0].time < pair[1].time) {
+            return None;
+        }
+        Some(Self {
+            preset,
+            aligned: mode == 1,
+            timeline: timeline.into(),
+        })
+    }
+
+    fn aligned_levels(&self, report: Report) -> Option<Levels> {
+        let time = report.time?;
+        let frame = self
+            .timeline
+            .binary_search_by_key(&time, |frame| frame.time)
+            .ok()?;
+        Some(self.timeline[frame].levels())
+    }
+
+    fn excess(&self, report: Report, aligned_levels: Option<Levels>) -> Levels {
+        let (live, target) = if self.aligned {
+            let Some(target) = aligned_levels else {
+                return [None; MAX_BANDS];
+            };
+            (report.window, target)
+        } else if report.audible {
+            (report.live, self.preset.targets)
+        } else {
+            return [None; MAX_BANDS];
+        };
+        std::array::from_fn(|band| {
+            let (live, target) = live[band].zip(target[band])?;
+            let excess = live - target.max(MIN_TARGET_DB) - self.preset.offset_db();
+            (live >= MIN_TARGET_DB && excess > TRIGGER_DB).then_some(excess)
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Action {
     Begin,
@@ -100,6 +185,7 @@ pub enum Action {
     Resize(bool),
     Crossover(usize, i32),
     Offset(i8),
+    ToggleComparison,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -110,6 +196,11 @@ pub struct Snapshot {
     pub ready: bool,
     pub live: Levels,
     pub peaks: Levels,
+    pub excess: Levels,
+    pub aligned: bool,
+    pub can_align: bool,
+    pub aligned_frame: bool,
+    pub timeline_full: bool,
 }
 
 pub struct Shared(Mutex<Session>);
@@ -117,10 +208,23 @@ pub struct Shared(Mutex<Session>);
 pub struct AudioLink {
     pub commands: Output<Command>,
     pub reports: Input<Report>,
+    frames: Producer<(u64, TimelineFrame)>,
+}
+
+impl AudioLink {
+    pub fn record(&mut self, report: Report) {
+        if let (Some(capture), Some(time)) = (report.command.capture, report.time) {
+            let _ = self
+                .frames
+                .push((capture, TimelineFrame::new(time, report.window)));
+        }
+    }
 }
 
 struct Session {
-    preset: Preset,
+    saved: SavedState,
+    captured: Vec<TimelineFrame>,
+    frames: Consumer<(u64, TimelineFrame)>,
     capture: Option<u64>,
     last_capture: u64,
     commands: Input<Command>,
@@ -130,10 +234,21 @@ struct Session {
 
 impl Shared {
     pub fn new() -> (Self, AudioLink) {
+        Self::with_capacity(MAX_TIMELINE_FRAMES)
+    }
+
+    pub fn detached() -> Self {
+        Self::with_capacity(1).0
+    }
+
+    fn with_capacity(capacity: usize) -> (Self, AudioLink) {
         let (control_out, audio_in) = triple_buffer(&Command::default());
         let (audio_out, control_in) = triple_buffer(&Report::default());
+        let (frames_out, frames_in) = RingBuffer::new(capacity);
         let session = Session {
-            preset: Preset::default(),
+            saved: SavedState::default(),
+            captured: Vec::new(),
+            frames: frames_in,
             capture: None,
             last_capture: 0,
             commands: control_out,
@@ -145,6 +260,7 @@ impl Shared {
             AudioLink {
                 commands: audio_in,
                 reports: audio_out,
+                frames: frames_out,
             },
         )
     }
@@ -155,13 +271,14 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub fn preset(&self) -> Preset {
-        self.lock().preset
+    pub fn state(&self) -> SavedState {
+        self.lock().saved.clone()
     }
 
-    pub fn restore(&self, preset: Preset) {
+    pub fn restore(&self, state: SavedState) {
         let mut session = self.lock();
-        session.preset = preset;
+        session.saved = state;
+        session.captured.clear();
         session.capture = None;
         session.publish();
     }
@@ -173,16 +290,34 @@ impl Shared {
             .last_update
             .is_some_and(|time| time.elapsed() < Duration::from_millis(500));
         let valid_capture = session.capture.is_some() && report.command == session.command();
+        let preset = session.saved.preset;
+        let capturing = session.capture.is_some();
+        let compare = !capturing && preset.has_reference();
+        let valid_meter = current && report.command.layout == preset.layout;
+        let aligned_levels = if compare && valid_meter && session.saved.aligned {
+            session.saved.aligned_levels(report)
+        } else {
+            None
+        };
         Snapshot {
-            preset: session.preset,
-            capturing: session.capture.is_some(),
+            preset,
+            aligned_frame: aligned_levels.is_some(),
+            aligned: session.saved.aligned,
+            can_align: !session.saved.timeline.is_empty(),
+            timeline_full: session.captured.len() == MAX_TIMELINE_FRAMES,
+            excess: if compare && valid_meter {
+                session.saved.excess(report, aligned_levels)
+            } else {
+                [None; MAX_BANDS]
+            },
+            capturing,
             active_seconds: if valid_capture {
                 report.active_seconds
             } else {
                 0.0
             },
             ready: valid_capture && report.ready(),
-            live: if current && report.audible && report.command.layout == session.preset.layout {
+            live: if !compare && valid_meter && report.audible {
                 report.live
             } else {
                 [None; MAX_BANDS]
@@ -198,52 +333,72 @@ impl Shared {
     /// Returns whether the operation changed the host's persistent state.
     pub fn apply(&self, action: Action) -> bool {
         let mut session = self.lock();
-        let previous = session.preset;
+        let previous = session.saved.preset;
+        let was_aligned = session.saved.aligned;
+        let mut reference_changed = false;
         let before = session.command();
         let idle = session.capture.is_none();
         let editable = idle && !previous.has_reference();
         match action {
             Action::Begin if idle => {
+                session.captured.clear();
                 session.last_capture = session.last_capture.wrapping_add(1);
                 session.capture = Some(session.last_capture);
             }
-            Action::Cancel => session.capture = None,
+            Action::Cancel => {
+                session.capture = None;
+                session.captured.clear();
+            }
             Action::Save if !idle => {
                 let report = session.report();
                 if report.command == before && report.ready() {
-                    session.preset.targets = report.peaks;
-                    session.preset.offset_steps = 0;
+                    let mut captured = std::mem::take(&mut session.captured);
+                    captured.sort_by_key(|frame| frame.time);
+                    captured.dedup_by_key(|frame| frame.time);
+                    session.saved.aligned = !captured.is_empty();
+                    session.saved.timeline = captured.into();
+                    session.saved.preset.targets = report.peaks;
+                    session.saved.preset.offset_steps = 0;
                     session.capture = None;
+                    reference_changed = true;
                 }
             }
             Action::Clear if idle => {
-                session.preset.targets = [None; MAX_BANDS];
-                session.preset.offset_steps = 0;
+                session.saved.timeline = Arc::default();
+                session.saved.aligned = false;
+                session.saved.preset.targets = [None; MAX_BANDS];
+                session.saved.preset.offset_steps = 0;
             }
-            Action::Resize(grow) if editable => session.preset.layout.resize(grow),
+            Action::Resize(grow) if editable => session.saved.preset.layout.resize(grow),
             Action::Crossover(index, steps) if editable => {
-                session.preset.layout.adjust(index, steps)
+                session.saved.preset.layout.adjust(index, steps)
             }
             Action::Offset(steps) if idle && previous.has_reference() => {
-                session.preset.offset_steps = session
+                session.saved.preset.offset_steps = session
+                    .saved
                     .preset
                     .offset_steps
                     .saturating_add(steps)
                     .clamp(-OFFSET_LIMIT, OFFSET_LIMIT);
+            }
+            Action::ToggleComparison if idle && !session.saved.timeline.is_empty() => {
+                session.saved.aligned = !session.saved.aligned;
             }
             _ => {}
         }
         if before != session.command() {
             session.publish();
         }
-        session.preset != previous
+        reference_changed
+            || session.saved.preset != previous
+            || session.saved.aligned != was_aligned
     }
 }
 
 impl Session {
     fn command(&self) -> Command {
         Command {
-            layout: self.preset.layout,
+            layout: self.saved.preset.layout,
             capture: self.capture,
         }
     }
@@ -256,7 +411,15 @@ impl Session {
         if self.reports.updated() {
             self.last_update = Some(Instant::now());
         }
-        *self.reports.read()
+        let report = *self.reports.read();
+        // The audio side enqueues each frame before publishing its report.
+        // Keep only the active capture, even if commands change mid-block.
+        while let Ok((capture, frame)) = self.frames.pop() {
+            if Some(capture) == self.capture && self.captured.len() < MAX_TIMELINE_FRAMES {
+                self.captured.push(frame);
+            }
+        }
+        report
     }
 }
 
@@ -283,7 +446,8 @@ mod tests {
         });
         assert!(shared.apply(Action::Save));
         assert!(shared.apply(Action::Offset(-3)));
-        let preset = shared.preset();
+        let state = shared.state();
+        let preset = state.preset;
         assert_eq!(preset.target(0), Some(-21.5));
         assert_eq!(Preset::decode(&preset.encode()), Some(preset));
         assert!(!shared.apply(Action::Resize(true)));
@@ -292,12 +456,12 @@ mod tests {
         // The old capture's report still occupies the mailbox.
         assert!(!shared.apply(Action::Save));
         shared.apply(Action::Cancel);
-        assert_eq!(shared.preset(), preset);
+        assert_eq!(shared.state(), state);
 
         assert!(shared.apply(Action::Clear));
         assert!(shared.apply(Action::Resize(true)));
-        shared.restore(preset);
-        assert_eq!(shared.preset(), preset);
+        shared.restore(state.clone());
+        assert_eq!(shared.state(), state);
     }
 
     #[test]
@@ -309,5 +473,29 @@ mod tests {
         let mut bytes = Preset::default().encode();
         bytes[15..19].copy_from_slice(&f32::NAN.to_le_bytes());
         assert!(Preset::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn legacy_peak_reference_is_preserved_and_only_excess_triggers() {
+        let mut preset = Preset::default();
+        preset.targets[0] = Some(-20.0);
+        let state = SavedState::decode(1, &preset.encode()).unwrap();
+        assert_eq!(state.preset, preset);
+        assert!(!state.aligned);
+        assert_eq!(SavedState::decode(2, &state.encode()), Some(state.clone()));
+        for (db, expected) in [
+            (-29.0, None),
+            (-20.0, None),
+            (-19.0, None),
+            (-18.5, Some(1.5)),
+            (-9.0, Some(11.0)),
+        ] {
+            let mut report = Report {
+                audible: true,
+                ..Report::default()
+            };
+            report.live[0] = Some(db);
+            assert_eq!(state.excess(report, None)[0], expected);
+        }
     }
 }

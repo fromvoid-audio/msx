@@ -9,7 +9,7 @@ use std::{
 use toybox::vst3::prelude::{Steinberg::*, *};
 
 use crate::{
-    analyzer::{Analyzer, Command},
+    analyzer::{Analyzer, Command, FrameTime},
     session::{AudioLink, Shared},
 };
 
@@ -26,6 +26,7 @@ pub struct Processor {
 struct Runtime {
     link: AudioLink,
     analyzer: Analyzer,
+    sample_rate_bits: u64,
 }
 
 // SAFETY: VST3 serializes process callbacks for an instance. The try-acquire
@@ -49,6 +50,7 @@ impl Processor {
             runtime: UnsafeCell::new(Runtime {
                 link,
                 analyzer: Analyzer::new(48_000.0, Command::default()),
+                sample_rate_bits: 48_000.0_f64.to_bits(),
             }),
         }
     }
@@ -92,6 +94,12 @@ impl Class for Processor {
 }
 
 impl_vst3_instance_connection!(Processor, connection);
+
+impl IProcessContextRequirementsTrait for Processor {
+    unsafe fn getProcessContextRequirements(&self) -> u32 {
+        IProcessContextRequirements_::Flags_::kNeedTransportState
+    }
+}
 
 impl IPluginBaseTrait for Processor {
     unsafe fn initialize(&self, _: *mut FUnknown) -> tresult {
@@ -180,7 +188,7 @@ impl IComponentTrait for Processor {
     }
 
     unsafe fn getState(&self, stream: *mut IBStream) -> tresult {
-        unsafe { store_state(stream, self.shared.preset()) }
+        unsafe { store_state(stream, &self.shared.state()) }
     }
 }
 
@@ -257,6 +265,7 @@ impl IAudioProcessorTrait for Processor {
             let mut analyzer = Analyzer::new(setup.sampleRate, command);
             analyzer.resume_capture(previous);
             runtime.analyzer = analyzer;
+            runtime.sample_rate_bits = setup.sampleRate.to_bits();
             runtime.link.reports.write(runtime.analyzer.report());
         })
     }
@@ -321,8 +330,18 @@ impl IAudioProcessorTrait for Processor {
         let [(left_in, left_out), (right_in, right_out)] = channels;
         let stereo = count == 2;
         output.silenceFlags = input.silenceFlags;
+        let project_start = unsafe { data.processContext.as_ref() }.and_then(|context| {
+            let playing = context.state & ProcessContext_::StatesAndFlags_::kPlaying != 0;
+            context
+                .projectTimeSamples
+                .checked_add(i64::from(data.numSamples))?;
+            playing.then_some(context.projectTimeSamples)
+        });
         self.with_runtime(|runtime| {
             runtime.analyzer.configure(*runtime.link.commands.read());
+            if runtime.analyzer.begin_block(project_start, data.numSamples) {
+                runtime.link.reports.write(runtime.analyzer.report());
+            }
             for index in 0..data.numSamples as usize {
                 // The host provides buffers of numSamples. Read both inputs
                 // before writing either output, including for in-place buses.
@@ -338,7 +357,12 @@ impl IAudioProcessorTrait for Processor {
                         right_out.add(index).write(right);
                     }
                 }
-                if let Some(report) = runtime.analyzer.push(left, right) {
+                if let Some(mut report) = runtime.analyzer.push(left, right) {
+                    report.time = project_start.map(|start| FrameTime {
+                        sample_rate_bits: runtime.sample_rate_bits,
+                        end_sample: start + index as i64 + 1,
+                    });
+                    runtime.link.record(report);
                     runtime.link.reports.write(report);
                 }
             }

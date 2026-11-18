@@ -4,14 +4,14 @@ use toybox::{
     gpui::{
         AppContext, Context, Div, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
         MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Render,
-        StatefulInteractiveElement, Styled, Task, Window, div, px, rgb,
+        StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
     },
     gpui_gui::GpuiHostedGui,
     vst3::prelude::{IComponentHandler2, IComponentHandler2Trait, InstanceConnection},
 };
 
 use crate::{
-    analyzer::{MAX_BANDS, MIN_BANDS, NEAR_DB},
+    analyzer::{MAX_BANDS, MIN_BANDS},
     session::{Action, Shared, Snapshot},
 };
 
@@ -246,6 +246,8 @@ impl Render for Editor {
             "Waiting for audio processor".to_owned()
         } else if s.capturing && s.active_seconds == 0.0 {
             "Play the reference in your DAW".to_owned()
+        } else if s.capturing && s.timeline_full {
+            "Timeline capture limit reached".to_owned()
         } else if s.capturing {
             format!("Capturing · {:.1} s of audio", s.active_seconds)
         } else if has_reference {
@@ -384,6 +386,22 @@ impl Render for Editor {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
+                            .when(compare, |row| {
+                                row.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(MUTED))
+                                        .child("Compare"),
+                                )
+                                .child(self.button(
+                                    4,
+                                    if s.aligned { "Timeline" } else { "Peak" },
+                                    Action::ToggleComparison,
+                                    self.connected && s.can_align,
+                                    false,
+                                    cx,
+                                ))
+                            })
                             .child(
                                 div()
                                     .text_size(px(11.0))
@@ -423,9 +441,11 @@ impl Render for Editor {
                     .child(if s.capturing && !s.ready {
                         "Capture at least one second of audible material."
                     } else if s.capturing {
-                        "Use reference to keep the strongest sustained levels."
+                        "Use reference to save this capture."
+                    } else if s.aligned && !s.aligned_frame {
+                        "Play the captured section at its original position, or switch to Peak."
                     } else if has_reference {
-                        "Clear the reference to edit the crossover layout."
+                        "Raise a mix element until its band triggers, then back off until it clears."
                     } else {
                         "Set your crossovers, then play a representative passage."
                     })
@@ -447,7 +467,7 @@ fn meter(s: Snapshot, compare: bool) -> Div {
         } else {
             s.preset.target(band)
         };
-        let delta = live.zip(target).map(|(live, target)| live - target);
+        let excess = s.excess[band];
         bands = bands.child(
             div()
                 .flex_1()
@@ -462,29 +482,31 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                         .text_color(rgb(TEXT))
                         .child(format!("{}–{}", short_hz(lo), short_hz(hi))),
                 )
-                .child(band_graph(compare, live, target, delta))
+                .child(band_graph(compare, live, target, excess))
                 .child(
                     div()
                         .text_center()
                         .text_size(px(14.0))
-                        .text_color(rgb(if compare { delta_color(delta) } else { TEXT }))
+                        .text_color(rgb(if compare && excess.is_some() {
+                            HIGH
+                        } else {
+                            TEXT
+                        }))
                         .child(if compare {
-                            signed_db(delta)
+                            excess.map_or_else(|| "—".to_owned(), |value| format!("{value:+.1}"))
                         } else {
                             absolute_db(live)
                         }),
                 )
-                .child(
-                    div()
-                        .text_center()
-                        .text_size(px(10.0))
-                        .text_color(rgb(MUTED))
-                        .child(if compare || s.capturing {
-                            absolute_db(target)
-                        } else {
-                            "—".to_owned()
-                        }),
-                ),
+                .when(!compare || !s.aligned, |band| {
+                    band.child(
+                        div()
+                            .text_center()
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .child(absolute_db(target)),
+                    )
+                }),
         );
     }
     let legend = div()
@@ -512,10 +534,7 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                     "Band levels"
                 }))
                 .child(if compare {
-                    legend
-                        .child(div().text_color(rgb(HIGH)).child("High"))
-                        .child(div().text_color(rgb(NEAR)).child("Near ±1 dB"))
-                        .child(div().text_color(rgb(LOW)).child("Low"))
+                    legend.text_color(rgb(MUTED)).child("Triggers above +1 dB")
                 } else {
                     legend.text_color(rgb(MUTED)).child("dBFS RMS")
                 }),
@@ -539,12 +558,14 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                                 .text_color(rgb(MUTED))
                                 .child(if compare { "Δ dB" } else { "Live" }),
                         )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(MUTED))
-                                .child(if s.capturing { "Peak" } else { "Target" }),
-                        ),
+                        .when(!compare || !s.aligned, |axis| {
+                            axis.child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(MUTED))
+                                    .child(if s.capturing { "Peak" } else { "Target" }),
+                            )
+                        }),
                 )
                 .child(bands),
         )
@@ -552,7 +573,7 @@ fn meter(s: Snapshot, compare: bool) -> Div {
 
 fn axis(compare: bool) -> Div {
     let labels = if compare {
-        ["+12", "0", "−12"]
+        ["+12", "+6", "0"]
     } else {
         ["0", "−36", "−72"]
     };
@@ -566,7 +587,7 @@ fn axis(compare: bool) -> Div {
         .children(labels)
 }
 
-fn band_graph(compare: bool, live: Option<f32>, target: Option<f32>, delta: Option<f32>) -> Div {
+fn band_graph(compare: bool, live: Option<f32>, target: Option<f32>, excess: Option<f32>) -> Div {
     let mid = GRAPH_H * 0.5;
     let mut graph = div()
         .relative()
@@ -574,9 +595,6 @@ fn band_graph(compare: bool, live: Option<f32>, target: Option<f32>, delta: Opti
         .bg(rgb(BG))
         .rounded(px(4.0))
         .overflow_hidden();
-    if compare {
-        graph = graph.child(line(mid - 6.0, 12.0, 0x243c39));
-    }
     graph = graph.child(line(mid, 1.0, GRID));
     let bar = |top: f32, height: f32, color: u32| {
         div()
@@ -589,13 +607,9 @@ fn band_graph(compare: bool, live: Option<f32>, target: Option<f32>, delta: Opti
             .rounded(px(2.0))
     };
     if compare {
-        if let Some(delta) = delta {
-            let height = (delta.abs() / 12.0).min(1.0) * mid;
-            graph = graph.child(bar(
-                if delta >= 0.0 { mid - height } else { mid },
-                height,
-                delta_color(Some(delta)),
-            ));
+        if let Some(excess) = excess {
+            let height = (excess / 12.0).min(1.0) * GRAPH_H;
+            graph = graph.child(bar(GRAPH_H - height, height, HIGH));
         }
     } else {
         let pos = |db: f32| (-db / 72.0).clamp(0.0, 1.0) * GRAPH_H;
@@ -618,19 +632,6 @@ fn line(top: f32, height: f32, color: u32) -> Div {
         .top(px(top))
         .h(px(height))
         .bg(rgb(color))
-}
-
-fn delta_color(delta: Option<f32>) -> u32 {
-    match delta {
-        Some(delta) if delta > NEAR_DB => HIGH,
-        Some(delta) if delta < -NEAR_DB => LOW,
-        Some(_) => NEAR,
-        None => DIM,
-    }
-}
-
-fn signed_db(db: Option<f32>) -> String {
-    db.map_or_else(|| "—".to_owned(), |value| format!("{value:+.1}"))
 }
 
 fn absolute_db(db: Option<f32>) -> String {
