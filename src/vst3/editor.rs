@@ -427,7 +427,7 @@ impl Render for Editor {
                     } else if s.capturing {
                         "Use reference to save the peak in each band."
                     } else if has_reference {
-                        "Raise a mix element until its band triggers, then back off until it clears."
+                        "Raise a mix element until its band triggers, then back off until the orange fill clears."
                     } else {
                         "Set your crossovers, then play a representative passage."
                     })
@@ -450,6 +450,8 @@ fn meter(s: Snapshot, compare: bool) -> Div {
             s.preset.threshold(band)
         };
         let triggered = compare && s.excess[band].is_some();
+        let held = s.held[band];
+        let peak_over = held.zip(marker).map(|(level, threshold)| level - threshold);
         bands = bands.child(
             div()
                 .flex_1()
@@ -464,7 +466,7 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                         .text_color(rgb(TEXT))
                         .child(format!("{}–{}", short_hz(lo), short_hz(hi))),
                 )
-                .child(band_graph(live, marker, triggered))
+                .child(band_graph(live, marker, triggered, held))
                 .child(
                     div()
                         .text_center()
@@ -478,7 +480,16 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                         .text_size(px(10.0))
                         .text_color(rgb(NEAR))
                         .child(absolute_db(marker)),
-                ),
+                )
+                .children(compare.then(|| {
+                    div()
+                        .text_center()
+                        .text_size(px(10.0))
+                        .text_color(rgb(if peak_over.is_some() { HIGH } else { MUTED }))
+                        .child(
+                            peak_over.map_or_else(|| "—".to_owned(), |db| format!("{db:+.1} dB")),
+                        )
+                })),
         );
     }
     let legend = div().text_size(px(10.0)).text_color(rgb(MUTED));
@@ -531,7 +542,13 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                                 .text_size(px(10.0))
                                 .text_color(rgb(NEAR))
                                 .child(if s.capturing { "Peak" } else { "Threshold" }),
-                        ),
+                        )
+                        .children(compare.then(|| {
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(MUTED))
+                                .child("Peak over")
+                        })),
                 )
                 .child(bands),
         )
@@ -555,7 +572,7 @@ fn axis() -> Div {
         }))
 }
 
-fn band_graph(live: Option<f32>, marker: Option<f32>, triggered: bool) -> Div {
+fn band_graph(live: Option<f32>, marker: Option<f32>, triggered: bool, held: Option<f32>) -> Div {
     let mut graph = div()
         .relative()
         .h(px(GRAPH_H))
@@ -581,6 +598,10 @@ fn band_graph(live: Option<f32>, marker: Option<f32>, triggered: bool) -> Div {
     }
     if let Some(db) = marker {
         graph = graph.child(line(meter_y(db).min(GRAPH_H - 2.0), 2.0, NEAR));
+    }
+    if let Some(db) = held {
+        let top = meter_y(db).min(GRAPH_H - 2.0);
+        graph = graph.child(bar(top, top + 2.0, HIGH));
     }
     graph
 }

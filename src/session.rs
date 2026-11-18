@@ -8,7 +8,7 @@ use std::{
 use triple_buffer::{Input, Output, triple_buffer};
 
 use crate::analyzer::{
-    Command, FLOOR_DB, Layout, Levels, MAX_BANDS, MIN_TARGET_DB, Report, TRIGGER_DB,
+    Command, FLOOR_DB, Layout, Levels, MAX_BANDS, MIN_TARGET_DB, Report, TRIGGER_DB, trigger_excess,
 };
 
 const OFFSET_LIMIT: i8 = 48; // Half-decibel steps.
@@ -57,8 +57,7 @@ impl Preset {
     fn excess(self, live: Levels) -> Levels {
         std::array::from_fn(|band| {
             let (level, target) = live[band].zip(self.target(band))?;
-            let excess = level - target;
-            (level >= MIN_TARGET_DB && excess > TRIGGER_DB).then_some(excess)
+            trigger_excess(level, target)
         })
     }
 
@@ -141,6 +140,7 @@ pub struct Snapshot {
     pub live: Levels,
     pub peaks: Levels,
     pub excess: Levels,
+    pub held: Levels,
 }
 
 pub struct Shared(Mutex<Session>);
@@ -200,10 +200,10 @@ impl Shared {
     pub fn snapshot(&self) -> Snapshot {
         let mut session = self.lock();
         let report = session.report();
-        let current = session
-            .last_update
-            .is_some_and(|time| time.elapsed() < Duration::from_millis(500));
-        let valid_capture = session.capture.is_some() && report.command == session.command();
+        let report_age = session.last_update.map(|time| time.elapsed());
+        let current = report_age.is_some_and(|age| age < Duration::from_millis(500));
+        let same_command = report.command == session.command();
+        let valid_capture = session.capture.is_some() && same_command;
         let preset = session.preset;
         let capturing = session.capture.is_some();
         let compare = !capturing && preset.has_reference();
@@ -224,6 +224,14 @@ impl Shared {
             live,
             excess: if compare && report.audible {
                 preset.excess(live)
+            } else {
+                [None; MAX_BANDS]
+            },
+            held: if compare && same_command {
+                report.held.map(|peak| {
+                    let (peak, age) = peak.zip(report_age)?;
+                    (peak.remaining_seconds > age.as_secs_f64()).then_some(peak.level)
+                })
             } else {
                 [None; MAX_BANDS]
             },
@@ -285,6 +293,13 @@ impl Session {
         Command {
             layout: self.preset.layout,
             capture: self.capture,
+            targets: if self.capture.is_none() {
+                self.preset
+                    .targets
+                    .map(|level| level.map(|db| db + self.preset.offset_db()))
+            } else {
+                [None; MAX_BANDS]
+            },
         }
     }
 
@@ -369,6 +384,49 @@ mod tests {
             assert_eq!(snapshot.live, live);
             assert_eq!(snapshot.excess[0].is_some(), triggered);
         }
+    }
+
+    #[test]
+    fn short_overage_survives_unread_reports_and_expires() {
+        use crate::analyzer::Analyzer;
+        use std::f64::consts::TAU;
+
+        let (shared, mut audio) = Shared::new();
+        let mut preset = Preset::default();
+        preset.targets[3] = Some(-24.0);
+        shared.restore(preset);
+        let mut analyzer = Analyzer::new(48_000.0, *audio.commands.read());
+        let mut sample_index = 0;
+        let mut feed = |samples: usize, amplitude: f32| {
+            let mut highest = FLOOR_DB;
+            for _ in 0..samples {
+                let x = amplitude * (TAU * 750.0 * f64::from(sample_index) / 48_000.0).sin() as f32;
+                sample_index += 1;
+                if let Some(report) = analyzer.push(x, x) {
+                    highest = highest.max(report.live[3].unwrap());
+                    audio.reports.write(report);
+                }
+            }
+            highest
+        };
+        feed(24_000, 0.025);
+        assert_eq!(shared.snapshot().held[3], None);
+        let highest = feed(1_536, 0.8).max(feed(24_000, 0.025));
+        assert!(highest > -21.0);
+
+        let snapshot = shared.snapshot();
+        assert_eq!(snapshot.excess[3], None);
+        assert_eq!(snapshot.held[3], Some(highest));
+        assert_eq!(snapshot.held[4], None);
+
+        shared.lock().last_update = Some(Instant::now() - Duration::from_secs(2));
+        assert_eq!(shared.snapshot().held[3], None);
+        assert_eq!(shared.snapshot().live[3], None);
+
+        feed(48_000, 0.025);
+        let snapshot = shared.snapshot();
+        assert!(snapshot.live[3].is_some());
+        assert_eq!(snapshot.held[3], None);
     }
 
     #[test]

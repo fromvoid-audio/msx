@@ -6,6 +6,6 @@ Configure contiguous frequency bands and capture a representative passage from t
 
 Use six bands by default. The working surface has band-count controls, editable crossover frequencies, capture controls and an offset for aligning the entire target to a different gain stage. A band layout belongs to its captured target. Clearing the saved reference makes that layout editable again. Capturing a new reference on the same layout keeps the old one until the user accepts the new capture.
 
-Show the live RMS level and the fixed trigger threshold on the same dBFS scale, with both values visible. Keep the live fill blue and use orange above the line when the band triggers. Keep capture and comparison in the same restrained, instrument-like view. Use Tab for focus, Return or Space for buttons, and arrow keys on frequency and offset controls. Save the layout and accepted targets in the host's project and preset state.
+Show the live RMS level and the fixed trigger threshold on the same dBFS scale, with both values visible. Keep the live fill blue and use orange above the line when the band triggers. Hold a separate peak marker and overage reading for one second so brief triggers remain visible. Keep capture and comparison in the same restrained, instrument-like view. Use Tab for focus, Return or Space for buttons, and arrow keys on frequency and offset controls. Save the layout and accepted targets in the host's project and preset state.
 
 A 1 dB margin keeps small deviations idle. Compare passages with similar instrumentation and gain staging.

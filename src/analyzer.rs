@@ -14,10 +14,16 @@ pub const TRIGGER_DB: f32 = 1.0;
 const ACTIVE_POWER: f64 = 3.162_277_660e-8; // −75 dBFS
 pub const MIN_TARGET_DB: f32 = -84.0;
 const SMOOTH_SECONDS: f64 = 0.15;
+const PEAK_HOLD_SECONDS: f64 = 1.0;
 const MIN_CUT: u16 = 35;
 const MAX_CUT: u16 = 16_000;
 
 pub type Levels = [Option<f32>; MAX_BANDS];
+
+pub fn trigger_excess(level: f32, target: f32) -> Option<f32> {
+    let excess = level - target;
+    (level >= MIN_TARGET_DB && excess > TRIGGER_DB).then_some(excess)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
@@ -114,6 +120,13 @@ fn separated(low: u16, high: u16) -> bool {
 pub struct Command {
     pub layout: Layout,
     pub capture: Option<u64>,
+    pub targets: Levels,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldPeak {
+    pub level: f32,
+    pub remaining_seconds: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -121,6 +134,7 @@ pub struct Report {
     pub command: Command,
     pub audible: bool,
     pub live: Levels,
+    pub held: [Option<HeldPeak>; MAX_BANDS],
     pub peaks: Levels,
     pub active_seconds: f64,
 }
@@ -128,6 +142,33 @@ pub struct Report {
 impl Report {
     pub fn ready(&self) -> bool {
         self.active_seconds >= MIN_CAPTURE_SECONDS && self.peaks.iter().any(Option::is_some)
+    }
+
+    // Update on the audio side so a short overage survives the latest-report
+    // mailbox even if the editor skips the frame in which it happened.
+    fn hold_peaks(&mut self, hop_seconds: f64) {
+        for (band, slot) in self.held.iter_mut().enumerate() {
+            let previous = slot
+                .map(|mut peak| {
+                    peak.remaining_seconds -= hop_seconds;
+                    peak
+                })
+                .filter(|peak| peak.remaining_seconds > 0.0);
+            let triggered = if self.audible {
+                self.live[band]
+                    .zip(self.command.targets[band])
+                    .and_then(|(level, target)| trigger_excess(level, target).map(|_| level))
+            } else {
+                None
+            };
+            *slot = match triggered {
+                Some(level) if previous.is_none_or(|peak| level >= peak.level) => Some(HeldPeak {
+                    level,
+                    remaining_seconds: PEAK_HOLD_SECONDS,
+                }),
+                _ => previous,
+            };
+        }
     }
 }
 
@@ -194,6 +235,7 @@ impl Analyzer {
         let layout_changed = self.report.command.layout != command.layout;
         self.report.command = command;
         self.report.peaks = [None; MAX_BANDS];
+        self.report.held = [None; MAX_BANDS];
         self.report.active_seconds = 0.0;
         if layout_changed {
             self.update_ranges();
@@ -217,6 +259,7 @@ impl Analyzer {
         self.primed = false;
         self.report.audible = false;
         self.report.live = [None; MAX_BANDS];
+        self.report.held = [None; MAX_BANDS];
     }
 
     fn update_ranges(&mut self) {
@@ -290,8 +333,10 @@ impl Analyzer {
         }
         self.primed = true;
         self.report.audible = total_power >= ACTIVE_POWER;
+        let hop_seconds = (size / 4) as f64 / self.rate;
+        self.report.hold_peaks(hop_seconds);
         if self.report.command.capture.is_some() && self.report.audible {
-            self.report.active_seconds += (size / 4) as f64 / self.rate;
+            self.report.active_seconds += hop_seconds;
             for (peak, live) in self.report.peaks.iter_mut().zip(self.report.live) {
                 if let Some(db) = live.filter(|level| *level >= MIN_TARGET_DB) {
                     *peak = Some(peak.map_or(db, |previous| previous.max(db)));
