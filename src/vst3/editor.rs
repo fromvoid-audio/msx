@@ -11,7 +11,7 @@ use toybox::{
 };
 
 use crate::{
-    analyzer::{MAX_BANDS, MIN_BANDS},
+    analyzer::{FLOOR_DB, MAX_BANDS, MIN_BANDS},
     session::{Action, Shared, Snapshot},
 };
 
@@ -30,6 +30,8 @@ const HIGH: u32 = 0xf8a477;
 const LOW: u32 = 0x81b6f3;
 const NEAR: u32 = 0x6fd8bb;
 const GRAPH_H: f32 = 144.0;
+const GRAPH_TOP_DB: f32 = 6.0;
+const GRAPH_TICKS: [i16; 4] = [0, -30, -60, -90];
 
 type Focuses = [FocusHandle; MAX_BANDS + 4];
 const OFFSET: usize = MAX_BANDS + 3;
@@ -442,12 +444,12 @@ fn meter(s: Snapshot, compare: bool) -> Div {
     for band in 0..count {
         let (lo, hi) = s.preset.layout.bounds(band);
         let live = s.live[band];
-        let target = if s.capturing {
+        let marker = if s.capturing {
             s.peaks[band]
         } else {
-            s.preset.target(band)
+            s.preset.threshold(band)
         };
-        let excess = s.excess[band];
+        let triggered = compare && s.excess[band].is_some();
         bands = bands.child(
             div()
                 .flex_1()
@@ -462,36 +464,24 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                         .text_color(rgb(TEXT))
                         .child(format!("{}–{}", short_hz(lo), short_hz(hi))),
                 )
-                .child(band_graph(compare, live, target, excess))
+                .child(band_graph(live, marker, triggered))
                 .child(
                     div()
                         .text_center()
                         .text_size(px(14.0))
-                        .text_color(rgb(if compare && excess.is_some() {
-                            HIGH
-                        } else {
-                            TEXT
-                        }))
-                        .child(if compare {
-                            excess.map_or_else(|| "—".to_owned(), |value| format!("{value:+.1}"))
-                        } else {
-                            absolute_db(live)
-                        }),
+                        .text_color(rgb(if triggered { HIGH } else { TEXT }))
+                        .child(absolute_db(live)),
                 )
                 .child(
                     div()
                         .text_center()
                         .text_size(px(10.0))
-                        .text_color(rgb(MUTED))
-                        .child(absolute_db(target)),
+                        .text_color(rgb(NEAR))
+                        .child(absolute_db(marker)),
                 ),
         );
     }
-    let legend = div()
-        .flex()
-        .items_center()
-        .gap(px(14.0))
-        .text_size(px(10.0));
+    let legend = div().text_size(px(10.0)).text_color(rgb(MUTED));
     div()
         .flex()
         .flex_col()
@@ -511,11 +501,11 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                 } else {
                     "Band levels"
                 }))
-                .child(if compare {
-                    legend.text_color(rgb(MUTED)).child("Triggers above +1 dB")
+                .child(legend.child(if compare {
+                    "dBFS RMS · Threshold includes +1 dB"
                 } else {
-                    legend.text_color(rgb(MUTED)).child("dBFS RMS")
-                }),
+                    "dBFS RMS"
+                })),
         )
         .child(
             div()
@@ -523,79 +513,74 @@ fn meter(s: Snapshot, compare: bool) -> Div {
                 .gap(px(7.0))
                 .child(
                     div()
-                        .w(px(44.0))
+                        .w(px(58.0))
                         .pt(px(17.0))
                         .flex()
                         .flex_col()
                         .gap(px(4.0))
-                        .child(axis(compare))
+                        .child(axis())
                         .child(
                             div()
                                 .h(px(19.0))
                                 .text_size(px(10.0))
                                 .text_color(rgb(MUTED))
-                                .child(if compare { "Δ dB" } else { "Live" }),
+                                .child("Live"),
                         )
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .text_color(rgb(MUTED))
-                                .child(if s.capturing { "Peak" } else { "Target" }),
+                                .text_color(rgb(NEAR))
+                                .child(if s.capturing { "Peak" } else { "Threshold" }),
                         ),
                 )
                 .child(bands),
         )
 }
 
-fn axis(compare: bool) -> Div {
-    let labels = if compare {
-        ["+12", "+6", "0"]
-    } else {
-        ["0", "−36", "−72"]
-    };
-    div()
-        .h(px(GRAPH_H))
-        .flex()
-        .flex_col()
-        .justify_between()
-        .text_color(rgb(MUTED))
-        .text_size(px(10.0))
-        .children(labels)
+fn meter_y(db: f32) -> f32 {
+    ((GRAPH_TOP_DB - db) / (GRAPH_TOP_DB - FLOOR_DB)).clamp(0.0, 1.0) * GRAPH_H
 }
 
-fn band_graph(compare: bool, live: Option<f32>, target: Option<f32>, excess: Option<f32>) -> Div {
-    let mid = GRAPH_H * 0.5;
+fn axis() -> Div {
+    div()
+        .relative()
+        .h(px(GRAPH_H))
+        .text_color(rgb(MUTED))
+        .text_size(px(10.0))
+        .children(GRAPH_TICKS.map(|db| {
+            div()
+                .absolute()
+                .top(px((meter_y(f32::from(db)) - 6.0).clamp(0.0, GRAPH_H - 12.0)))
+                .child(db.to_string())
+        }))
+}
+
+fn band_graph(live: Option<f32>, marker: Option<f32>, triggered: bool) -> Div {
     let mut graph = div()
         .relative()
         .h(px(GRAPH_H))
         .bg(rgb(BG))
         .rounded(px(4.0))
-        .overflow_hidden();
-    graph = graph.child(line(mid, 1.0, GRID));
-    let bar = |top: f32, height: f32, color: u32| {
+        .overflow_hidden()
+        .children(GRAPH_TICKS.map(|db| line(meter_y(f32::from(db)), 1.0, GRID)));
+    let bar = |top: f32, bottom: f32, color: u32| {
         div()
             .absolute()
             .left(px(9.0))
             .right(px(9.0))
             .top(px(top))
-            .h(px(height.max(2.0)))
+            .h(px(bottom - top))
             .bg(rgb(color))
-            .rounded(px(2.0))
     };
-    if compare {
-        if let Some(excess) = excess {
-            let height = (excess / 12.0).min(1.0) * GRAPH_H;
-            graph = graph.child(bar(GRAPH_H - height, height, HIGH));
+    if let Some(top) = live.map(meter_y).filter(|&top| top < GRAPH_H) {
+        graph = graph.child(bar(top, GRAPH_H, LOW));
+        if let Some(marker) = marker.filter(|_| triggered) {
+            let boundary = meter_y(marker).max(top + 1.0).min(GRAPH_H);
+            graph = graph.child(bar(top, boundary, HIGH));
         }
-    } else {
-        let pos = |db: f32| (-db / 72.0).clamp(0.0, 1.0) * GRAPH_H;
-        if let Some(db) = live {
-            let top = pos(db).min(GRAPH_H - 2.0);
-            graph = graph.child(bar(top, GRAPH_H - top, LOW));
-        }
-        if let Some(db) = target {
-            graph = graph.child(line(pos(db).min(GRAPH_H - 2.0), 2.0, NEAR));
-        }
+    }
+    if let Some(db) = marker {
+        graph = graph.child(line(meter_y(db).min(GRAPH_H - 2.0), 2.0, NEAR));
     }
     graph
 }

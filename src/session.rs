@@ -34,6 +34,11 @@ impl Preset {
         self.targets[band].map(|level| level + self.offset_db())
     }
 
+    pub fn threshold(self, band: usize) -> Option<f32> {
+        self.target(band)
+            .map(|target| (target + TRIGGER_DB).max(MIN_TARGET_DB))
+    }
+
     /// Version 2 stored the same peak preset followed by the comparison
     /// mode and timestamped measurements. Preserve the peak preset on load.
     pub fn decode_timeline_state(bytes: &[u8]) -> Option<Self> {
@@ -202,7 +207,7 @@ impl Shared {
         let preset = session.preset;
         let capturing = session.capture.is_some();
         let compare = !capturing && preset.has_reference();
-        let live = if current && report.audible && report.command.layout == preset.layout {
+        let live = if current && report.command.layout == preset.layout {
             report.live
         } else {
             [None; MAX_BANDS]
@@ -216,8 +221,8 @@ impl Shared {
                 0.0
             },
             ready: valid_capture && report.ready(),
-            live: if compare { [None; MAX_BANDS] } else { live },
-            excess: if compare {
+            live,
+            excess: if compare && report.audible {
                 preset.excess(live)
             } else {
                 [None; MAX_BANDS]
@@ -333,6 +338,37 @@ mod tests {
         assert!(shared.apply(Action::Resize(true)));
         shared.restore(preset);
         assert_eq!(shared.preset(), preset);
+    }
+
+    #[test]
+    fn live_levels_remain_visible_below_the_fixed_trigger_line() {
+        let (shared, mut audio) = Shared::new();
+        let mut preset = Preset::default();
+        preset.targets[0] = Some(-25.0);
+        shared.restore(preset);
+        shared.apply(Action::Offset(2));
+        let command = *audio.commands.read();
+        for (db, audible, triggered) in [
+            (-80.0, false, false),
+            (-35.0, true, false),
+            (-23.0, true, false),
+            (-21.0, true, true),
+            (-27.0, true, false),
+        ] {
+            let mut live = [None; MAX_BANDS];
+            live[0] = Some(db);
+            audio.reports.write(Report {
+                command,
+                audible,
+                live,
+                ..Report::default()
+            });
+            let snapshot = shared.snapshot();
+            assert_eq!(snapshot.preset.threshold(0), Some(-23.0));
+            assert_eq!(snapshot.preset.threshold(1), None);
+            assert_eq!(snapshot.live, live);
+            assert_eq!(snapshot.excess[0].is_some(), triggered);
+        }
     }
 
     #[test]

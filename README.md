@@ -5,7 +5,7 @@ MXH is a macOS VST3 reference meter built with Toybox. It measures band levels w
 1. Insert MXH on a bus that can receive your reference track and your mix.
 2. Set 2–8 bands and adjust their crossovers. Click the frequency steppers, drag a frequency vertically, or focus it and use the arrow keys.
 3. Click **Capture reference**, play a representative section, and click **Use reference**. Capture at least one second of audible material.
-4. Switch the bus to your mix. Each band uses its captured peak as a fixed target. Raise a mix element until its band shows an orange bar, then back it off until the bar clears. The bar appears when the level exceeds the target by more than 1 dB.
+4. Switch the bus to your mix. Each band shows the live level as a blue bar and the fixed trigger threshold as a teal line on the same dBFS scale. The threshold includes the captured peak, target offset and 1 dB trigger margin. Raise a mix element until orange appears above the line, then back it off until the orange clears.
 5. Use **Target offset** to align the reference with your gain staging. Save the session or a host plug-in preset to reuse the reference.
 
 The peak is the highest smoothed RMS level reached in each band during the capture. You can use the reference anywhere in the project or in another session. Existing references retain their peaks on load. **Capture again** retains the prior reference until you accept a replacement. **Clear reference** unlocks the band layout. Tab moves focus, Enter or Space activates buttons, and Shift plus an arrow key makes larger stepper adjustments.
