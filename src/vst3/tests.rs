@@ -98,7 +98,9 @@ fn host_capture_passes_stereo_through_and_restores_a_distinct_instance() {
     assert_eq!(unsafe { audio.setProcessing(0) }, kResultOk);
     assert!(shared.apply(Action::Save));
     assert!(shared.apply(Action::Offset(-2)));
+    assert!(shared.apply(Action::HoldTime(8)));
     let saved = shared.preset();
+    assert_eq!(saved.hold_time.milliseconds(), 1_300);
     assert!((saved.target(3).unwrap() - (-16.052)).abs() < 0.02);
 
     let stream = ComWrapper::new(Stream(RefCell::new(Cursor::new(Vec::new()))));

@@ -14,7 +14,6 @@ pub const TRIGGER_DB: f32 = 1.0;
 const ACTIVE_POWER: f64 = 3.162_277_660e-8; // −75 dBFS
 pub const MIN_TARGET_DB: f32 = -84.0;
 const SMOOTH_SECONDS: f64 = 0.15;
-const PEAK_HOLD_SECONDS: f64 = 1.0;
 const MIN_CUT: u16 = 35;
 const MAX_CUT: u16 = 16_000;
 
@@ -116,11 +115,49 @@ fn separated(low: u16, high: u16) -> bool {
     u32::from(low) * 5 <= u32::from(high) * 4
 }
 
+/// Peak hold in 100 ms steps, shared by saved settings and the audio callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HoldTime(u8);
+
+impl Default for HoldTime {
+    fn default() -> Self {
+        Self(5)
+    }
+}
+
+impl HoldTime {
+    const MIN: u8 = 1;
+    const MAX: u8 = 20;
+
+    pub fn from_steps(steps: u8) -> Option<Self> {
+        (Self::MIN..=Self::MAX)
+            .contains(&steps)
+            .then_some(Self(steps))
+    }
+
+    pub fn steps(self) -> u8 {
+        self.0
+    }
+
+    pub fn milliseconds(self) -> u16 {
+        u16::from(self.0) * 100
+    }
+
+    pub fn adjusted(self, steps: i8) -> Self {
+        Self(
+            self.0
+                .saturating_add_signed(steps)
+                .clamp(Self::MIN, Self::MAX),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Command {
     pub layout: Layout,
     pub capture: Option<u64>,
     pub targets: Levels,
+    pub hold_time: HoldTime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,6 +184,7 @@ impl Report {
     // Update on the audio side so a short overage survives the latest-report
     // mailbox even if the editor skips the frame in which it happened.
     fn hold_peaks(&mut self, hop_seconds: f64) {
+        let hold_seconds = f64::from(self.command.hold_time.milliseconds()) / 1000.0;
         for (band, slot) in self.held.iter_mut().enumerate() {
             let previous = slot
                 .map(|mut peak| {
@@ -164,7 +202,7 @@ impl Report {
             *slot = match triggered {
                 Some(level) if previous.is_none_or(|peak| level >= peak.level) => Some(HeldPeak {
                     level,
-                    remaining_seconds: PEAK_HOLD_SECONDS,
+                    remaining_seconds: hold_seconds,
                 }),
                 _ => previous,
             };
@@ -349,6 +387,25 @@ impl Analyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hold_expires_after_the_configured_duration() {
+        let mut report = Report {
+            audible: true,
+            ..Report::default()
+        };
+        report.command.hold_time = HoldTime::from_steps(2).unwrap();
+        report.command.targets[0] = Some(-20.0);
+        report.live[0] = Some(-15.0);
+        report.hold_peaks(0.04);
+        assert_eq!(report.held[0].unwrap().remaining_seconds, 0.2);
+
+        report.live[0] = Some(-25.0);
+        report.hold_peaks(0.19);
+        assert!(report.held[0].is_some());
+        report.hold_peaks(0.02);
+        assert_eq!(report.held[0], None);
+    }
 
     #[test]
     fn measures_stereo_power_without_phase_cancellation() {

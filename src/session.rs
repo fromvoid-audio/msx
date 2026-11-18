@@ -8,16 +8,19 @@ use std::{
 use triple_buffer::{Input, Output, triple_buffer};
 
 use crate::analyzer::{
-    Command, FLOOR_DB, Layout, Levels, MAX_BANDS, MIN_TARGET_DB, Report, TRIGGER_DB, trigger_excess,
+    Command, FLOOR_DB, HoldTime, Layout, Levels, MAX_BANDS, MIN_TARGET_DB, Report, TRIGGER_DB,
+    trigger_excess,
 };
 
 const OFFSET_LIMIT: i8 = 48; // Half-decibel steps.
-const STATE_BYTES: usize = (MAX_BANDS - 1) * 2 + 1 + MAX_BANDS * 4;
+const LEGACY_STATE_BYTES: usize = (MAX_BANDS - 1) * 2 + 1 + MAX_BANDS * 4;
+const STATE_BYTES: usize = LEGACY_STATE_BYTES + 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Preset {
     pub layout: Layout,
     pub targets: Levels,
+    pub hold_time: HoldTime,
     offset_steps: i8,
 }
 
@@ -42,7 +45,7 @@ impl Preset {
     /// Version 2 stored the same peak preset followed by the comparison
     /// mode and timestamped measurements. Preserve the peak preset on load.
     pub fn decode_timeline_state(bytes: &[u8]) -> Option<Self> {
-        let (preset, extension) = bytes.split_at_checked(STATE_BYTES)?;
+        let (preset, extension) = bytes.split_at_checked(LEGACY_STATE_BYTES)?;
         let (&mode, frames) = extension.split_first()?;
         const LEGACY_FRAME_BYTES: usize = 16 + MAX_BANDS * 4;
         if mode > 1
@@ -51,7 +54,7 @@ impl Preset {
         {
             return None;
         }
-        Self::decode(preset)
+        Self::decode_peak_state(preset)
     }
 
     fn excess(self, live: Levels) -> Levels {
@@ -63,7 +66,8 @@ impl Preset {
 
     pub fn encode(self) -> [u8; STATE_BYTES] {
         let mut bytes = [0; STATE_BYTES];
-        let (cut_bytes, rest) = bytes.split_at_mut((MAX_BANDS - 1) * 2);
+        bytes[LEGACY_STATE_BYTES] = self.hold_time.steps();
+        let (cut_bytes, rest) = bytes[..LEGACY_STATE_BYTES].split_at_mut((MAX_BANDS - 1) * 2);
         let (offset, target_bytes) = rest.split_first_mut().expect("preset has an offset byte");
         for (slot, cut) in cut_bytes
             .as_chunks_mut::<2>()
@@ -86,7 +90,14 @@ impl Preset {
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let bytes: &[u8; STATE_BYTES] = bytes.try_into().ok()?;
+        let (&steps, peak_state) = bytes.split_last()?;
+        let mut preset = Self::decode_peak_state(peak_state)?;
+        preset.hold_time = HoldTime::from_steps(steps)?;
+        Some(preset)
+    }
+
+    pub fn decode_peak_state(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; LEGACY_STATE_BYTES] = bytes.try_into().ok()?;
         let (cut_bytes, rest) = bytes.split_at((MAX_BANDS - 1) * 2);
         let (offset, target_bytes) = rest.split_first()?;
         let cut_chunks = cut_bytes.as_chunks::<2>().0;
@@ -115,6 +126,7 @@ impl Preset {
             layout,
             targets,
             offset_steps,
+            hold_time: HoldTime::default(),
         };
         (offset_steps == 0 || preset.has_reference()).then_some(preset)
     }
@@ -129,6 +141,7 @@ pub enum Action {
     Resize(bool),
     Crossover(usize, i32),
     Offset(i8),
+    HoldTime(i8),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -279,6 +292,9 @@ impl Shared {
                     .saturating_add(steps)
                     .clamp(-OFFSET_LIMIT, OFFSET_LIMIT);
             }
+            Action::HoldTime(steps) if idle => {
+                session.preset.hold_time = session.preset.hold_time.adjusted(steps);
+            }
             _ => {}
         }
         if before != session.command() {
@@ -293,6 +309,7 @@ impl Session {
         Command {
             layout: self.preset.layout,
             capture: self.capture,
+            hold_time: self.preset.hold_time,
             targets: if self.capture.is_none() {
                 self.preset
                     .targets
@@ -395,6 +412,7 @@ mod tests {
         let mut preset = Preset::default();
         preset.targets[3] = Some(-24.0);
         shared.restore(preset);
+        assert!(shared.apply(Action::HoldTime(5)));
         let mut analyzer = Analyzer::new(48_000.0, *audio.commands.read());
         let mut sample_index = 0;
         let mut feed = |samples: usize, amplitude: f32| {
@@ -430,6 +448,22 @@ mod tests {
     }
 
     #[test]
+    fn hold_time_can_change_before_capture_and_is_saved() {
+        let (shared, mut audio) = Shared::new();
+        assert_eq!(shared.preset().hold_time.milliseconds(), 500);
+        assert!(shared.apply(Action::HoldTime(-100)));
+        assert_eq!(audio.commands.read().hold_time.milliseconds(), 100);
+        assert!(!shared.apply(Action::HoldTime(-1)));
+        assert!(shared.apply(Action::HoldTime(100)));
+        let preset = shared.preset();
+        assert_eq!(preset.hold_time.milliseconds(), 2_000);
+        assert_eq!(Preset::decode(&preset.encode()), Some(preset));
+        let mut invalid = preset.encode();
+        invalid[LEGACY_STATE_BYTES] = 0;
+        assert!(Preset::decode(&invalid).is_none());
+    }
+
+    #[test]
     fn malformed_state_cannot_construct_a_preset() {
         let mut bytes = Preset::default().encode();
         assert!(Preset::decode(&bytes[..bytes.len() - 1]).is_none());
@@ -447,7 +481,8 @@ mod tests {
         preset.offset_steps = 2;
         // Original v2 encoding: v1 preset, mode byte, then a timed frame
         // with a deliberately different level from the saved peak.
-        let mut old = preset.encode().to_vec();
+        let mut old = preset.encode()[..LEGACY_STATE_BYTES].to_vec();
+        assert_eq!(Preset::decode_peak_state(&old), Some(preset));
         old.push(1);
         old.extend(48_000.0_f64.to_le_bytes());
         old.extend(8192_i64.to_le_bytes());

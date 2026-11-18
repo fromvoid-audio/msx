@@ -11,19 +11,21 @@ mod processor;
 
 const NAME: &str = "MXH";
 const STATE_MAGIC: u32 = u32::from_le_bytes(*b"MXH1");
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 3;
 
 unsafe fn load_state(stream: *mut IBStream) -> Option<Preset> {
+    const PEAK_STATE_VERSION: u32 = 1;
     const TIMELINE_STATE_VERSION: u32 = 2;
     let data = unsafe {
         read_versioned_payload(
             stream,
             STATE_MAGIC,
-            &[STATE_VERSION, TIMELINE_STATE_VERSION],
+            &[PEAK_STATE_VERSION, TIMELINE_STATE_VERSION, STATE_VERSION],
         )
     }
     .ok()?;
     match data.version {
+        PEAK_STATE_VERSION => Preset::decode_peak_state(&data.payload),
         STATE_VERSION => Preset::decode(&data.payload),
         TIMELINE_STATE_VERSION => Preset::decode_timeline_state(&data.payload),
         _ => None,

@@ -33,7 +33,7 @@ const GRAPH_H: f32 = 144.0;
 const GRAPH_TOP_DB: f32 = 6.0;
 const GRAPH_TICKS: [i16; 4] = [0, -30, -60, -90];
 
-type Focuses = [FocusHandle; MAX_BANDS + 4];
+type Focuses = [FocusHandle; MAX_BANDS + 5];
 const OFFSET: usize = MAX_BANDS + 3;
 
 struct Editor {
@@ -131,10 +131,7 @@ impl Editor {
         editable: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let focus_index = match control {
-            Stepper::Crossover(index) => 4 + index,
-            Stepper::Offset => OFFSET,
-        };
+        let focus_index = control.focus_index();
         let focus = self.focus[focus_index].clone();
         let base = div()
             .id(("stepper", focus_index))
@@ -196,11 +193,7 @@ impl Editor {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(GRID)).text_color(rgb(TEXT)))
             .on_click(cx.listener(move |this, _, window, cx| {
-                let id = match control {
-                    Stepper::Crossover(index) => 4 + index,
-                    Stepper::Offset => OFFSET,
-                };
-                window.focus(&this.focus[id], cx);
+                window.focus(&this.focus[control.focus_index()], cx);
                 this.apply(control.action(delta), cx);
             }))
             .child(if delta < 0 { "−" } else { "+" })
@@ -226,13 +219,23 @@ impl Editor {
 enum Stepper {
     Crossover(usize),
     Offset,
+    HoldTime,
 }
 
 impl Stepper {
+    fn focus_index(self) -> usize {
+        match self {
+            Self::Crossover(index) => 4 + index,
+            Self::Offset => OFFSET,
+            Self::HoldTime => OFFSET + 1,
+        }
+    }
+
     fn action(self, step: i8) -> Action {
         match self {
             Self::Crossover(index) => Action::Crossover(index, i32::from(step)),
             Self::Offset => Action::Offset(step),
+            Self::HoldTime => Action::HoldTime(step),
         }
     }
 }
@@ -396,6 +399,19 @@ impl Render for Editor {
                                 Stepper::Offset,
                                 format!("{:+.1} dB", s.preset.offset_db()),
                                 compare && self.connected,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .ml(px(8.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(MUTED))
+                                    .child("Peak hold"),
+                            )
+                            .child(self.stepper(
+                                Stepper::HoldTime,
+                                format!("{} ms", s.preset.hold_time.milliseconds()),
+                                self.connected && !s.capturing,
                                 cx,
                             )),
                     ),
