@@ -10,4 +10,4 @@ crate-type = ["cdylib", "rlib"]
 [target.'cfg(target_os = "macos")'.dependencies]
 rustfft = "6.4.1"
 triple_buffer = "9.0.0"
-toybox = { git = "https://github.com/PORTALSURFER/toybox.git", rev = "db656f567fb3c9e7ce3f1b1acd07a77ce7206170", default-features = false, features = ["gpui-vst3"] }
+toybox = { git = "https://github.com/fromvoid-audio/toybox.git", rev = "db656f567fb3c9e7ce3f1b1acd07a77ce7206170", default-features = false, features = ["gpui-vst3"] }
