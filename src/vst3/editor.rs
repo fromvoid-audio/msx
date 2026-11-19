@@ -299,7 +299,7 @@ impl Render for Editor {
         }
 
         div()
-            .id("mxh-editor")
+            .id("msx-editor")
             .size_full()
             .p(px(16.0))
             .flex()
@@ -331,7 +331,7 @@ impl Render for Editor {
                                 div()
                                     .text_size(px(25.0))
                                     .font_weight(toybox::gpui::FontWeight::SEMIBOLD)
-                                    .child("MXH"),
+                                    .child("MSX"),
                             )
                             .child(
                                 div()
@@ -448,7 +448,7 @@ impl Render for Editor {
                         "Set your crossovers, then play a representative passage."
                     })
                     .child(
-                        option_env!("MXH_DEV_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+                        option_env!("MSX_DEV_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
                     ),
             )
     }
@@ -650,7 +650,7 @@ fn short_hz(hz: u16) -> String {
 pub fn new(connection: Arc<InstanceConnection<Shared>>, handler: Handler) -> GpuiHostedGui {
     let size = SIZE;
     GpuiHostedGui::new(
-        "MxhEditorView",
+        "MsxEditorView",
         move |window, cx| {
             let connection = Arc::clone(&connection);
             let handler = handler.clone();

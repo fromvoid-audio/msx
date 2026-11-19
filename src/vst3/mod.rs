@@ -9,7 +9,8 @@ mod editor;
 mod factory;
 mod processor;
 
-const NAME: &str = "MXH";
+const NAME: &str = "MSX";
+// Preserve the header used by projects saved before the rename.
 const STATE_MAGIC: u32 = u32::from_le_bytes(*b"MXH1");
 const STATE_VERSION: u32 = 3;
 

@@ -1,4 +1,4 @@
-//! MXH component and controller factory.
+//! MSX component and controller factory.
 
 use std::ffi::c_void;
 

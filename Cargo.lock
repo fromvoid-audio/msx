@@ -2295,7 +2295,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxh"
+name = "msx"
 version = "0.1.0"
 dependencies = [
  "rustfft",
