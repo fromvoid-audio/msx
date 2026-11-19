@@ -14,10 +14,11 @@ MSX retains the VST3 class IDs and reads the settings and captured references fr
 
 ## Build on macOS
 
-Set `VST3_SDK_DIR` to a complete Steinberg VST3 SDK checkout. Run local checks and package an optimized, ad-hoc signed development bundle with:
+Set `VST3_SDK_DIR` to a complete Steinberg VST3 SDK checkout and run `./scripts/ci.sh` to check and build the optimized library.
+
+Maintainers with access to the pinned Plugin Release toolkit can package an ad-hoc signed development bundle with:
 
 ```sh
-./scripts/ci.sh
 ./scripts/plugin-release dev --variant msx
 ```
 
