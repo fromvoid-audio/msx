@@ -1,5 +1,7 @@
 # MSX
 
+[![Support me on Ko-fi](https://img.shields.io/badge/Support%20me%20on%20Ko--fi-72a4f2?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/F7X2225YCF)
+
 MSX is a macOS VST3 reference meter built with Toybox. It measures band levels while passing mono or stereo audio through at unity with zero latency.
 
 1. Insert MSX on a bus that can receive your reference track and your mix.
